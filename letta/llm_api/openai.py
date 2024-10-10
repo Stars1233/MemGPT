@@ -1,5 +1,6 @@
 import json
-from typing import Generator, Optional, Union
+import warnings
+from typing import Generator, List, Optional, Union
 
 import httpx
 import requests
@@ -8,10 +9,19 @@ from httpx_sse._exceptions import SSEError
 
 from letta.constants import OPENAI_CONTEXT_WINDOW_ERROR_SUBSTRING
 from letta.errors import LLMError
+from letta.llm_api.helpers import add_inner_thoughts_to_functions, make_post_request
+from letta.local_llm.constants import (
+    INNER_THOUGHTS_KWARG,
+    INNER_THOUGHTS_KWARG_DESCRIPTION,
+)
 from letta.local_llm.utils import num_tokens_from_functions, num_tokens_from_messages
+from letta.schemas.llm_config import LLMConfig
 from letta.schemas.message import Message as _Message
 from letta.schemas.message import MessageRole as _MessageRole
-from letta.schemas.openai.chat_completion_request import ChatCompletionRequest
+from letta.schemas.openai.chat_completion_request import (
+    ChatCompletionRequest,
+    cast_message_to_subtype,
+)
 from letta.schemas.openai.chat_completion_response import (
     ChatCompletionChunkResponse,
     ChatCompletionResponse,
@@ -31,7 +41,9 @@ from letta.utils import smart_urljoin
 OPENAI_SSE_DONE = "[DONE]"
 
 
-def openai_get_model_list(url: str, api_key: Union[str, None], fix_url: Optional[bool] = False) -> dict:
+def openai_get_model_list(
+    url: str, api_key: Union[str, None], fix_url: Optional[bool] = False, extra_params: Optional[dict] = None
+) -> dict:
     """https://platform.openai.com/docs/api-reference/models/list"""
     from letta.utils import printd
 
@@ -50,7 +62,8 @@ def openai_get_model_list(url: str, api_key: Union[str, None], fix_url: Optional
 
     printd(f"Sending request to {url}")
     try:
-        response = requests.get(url, headers=headers)
+        # TODO add query param "tool" to be true
+        response = requests.get(url, headers=headers, params=extra_params)
         response.raise_for_status()  # Raises HTTPError for 4XX/5XX status
         response = response.json()  # convert to dict from string
         printd(f"response = {response}")
@@ -79,6 +92,65 @@ def openai_get_model_list(url: str, api_key: Union[str, None], fix_url: Optional
             pass
         printd(f"Got unknown Exception, exception={e}, response={response}")
         raise e
+
+
+def build_openai_chat_completions_request(
+    llm_config: LLMConfig,
+    messages: List[Message],
+    user_id: Optional[str],
+    functions: Optional[list],
+    function_call: str,
+    use_tool_naming: bool,
+    inner_thoughts_in_kwargs: bool,
+    max_tokens: Optional[int],
+) -> ChatCompletionRequest:
+    if inner_thoughts_in_kwargs:
+        functions = add_inner_thoughts_to_functions(
+            functions=functions,
+            inner_thoughts_key=INNER_THOUGHTS_KWARG,
+            inner_thoughts_description=INNER_THOUGHTS_KWARG_DESCRIPTION,
+        )
+
+    openai_message_list = [
+        cast_message_to_subtype(m.to_openai_dict(put_inner_thoughts_in_kwargs=inner_thoughts_in_kwargs)) for m in messages
+    ]
+    if llm_config.model:
+        model = llm_config.model
+    else:
+        warnings.warn(f"Model type not set in llm_config: {llm_config.model_dump_json(indent=4)}")
+        model = None
+
+    if use_tool_naming:
+        data = ChatCompletionRequest(
+            model=model,
+            messages=openai_message_list,
+            tools=[{"type": "function", "function": f} for f in functions] if functions else None,
+            tool_choice=function_call,
+            user=str(user_id),
+            max_tokens=max_tokens,
+        )
+    else:
+        data = ChatCompletionRequest(
+            model=model,
+            messages=openai_message_list,
+            functions=functions,
+            function_call=function_call,
+            user=str(user_id),
+            max_tokens=max_tokens,
+        )
+        # https://platform.openai.com/docs/guides/text-generation/json-mode
+        # only supported by gpt-4o, gpt-4-turbo, or gpt-3.5-turbo
+        if "gpt-4o" in llm_config.model or "gpt-4-turbo" in llm_config.model or "gpt-3.5-turbo" in llm_config.model:
+            data.response_format = {"type": "json_object"}
+
+    if "inference.memgpt.ai" in llm_config.model_endpoint:
+        # override user id for inference.memgpt.ai
+        import uuid
+
+        data.user = str(uuid.UUID(int=0))
+        data.model = "memgpt-openai"
+
+    return data
 
 
 def openai_chat_completions_process_stream(
@@ -415,56 +487,14 @@ def openai_chat_completions_request(
         data.pop("tools")
         data.pop("tool_choice", None)  # extra safe,  should exist always (default="auto")
 
-    printd(f"Sending request to {url}")
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        printd(f"response = {response}, response.text = {response.text}")
-        response.raise_for_status()  # Raises HTTPError for 4XX/5XX status
-
-        response = response.json()  # convert to dict from string
-        printd(f"response.json = {response}")
-
-        response = ChatCompletionResponse(**response)  # convert to 'dot-dict' style which is the openai python client default
-        return response
-    except requests.exceptions.HTTPError as http_err:
-        # Handle HTTP errors (e.g., response 4XX, 5XX)
-        printd(f"Got HTTPError, exception={http_err}, payload={data}")
-        raise http_err
-    except requests.exceptions.RequestException as req_err:
-        # Handle other requests-related errors (e.g., connection error)
-        printd(f"Got RequestException, exception={req_err}")
-        raise req_err
-    except Exception as e:
-        # Handle other potential errors
-        printd(f"Got unknown Exception, exception={e}")
-        raise e
+    response_json = make_post_request(url, headers, data)
+    return ChatCompletionResponse(**response_json)
 
 
 def openai_embeddings_request(url: str, api_key: str, data: dict) -> EmbeddingResponse:
     """https://platform.openai.com/docs/api-reference/embeddings/create"""
-    from letta.utils import printd
 
     url = smart_urljoin(url, "embeddings")
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-
-    printd(f"Sending request to {url}")
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        printd(f"response = {response}")
-        response.raise_for_status()  # Raises HTTPError for 4XX/5XX status
-        response = response.json()  # convert to dict from string
-        printd(f"response.json = {response}")
-        response = EmbeddingResponse(**response)  # convert to 'dot-dict' style which is the openai python client default
-        return response
-    except requests.exceptions.HTTPError as http_err:
-        # Handle HTTP errors (e.g., response 4XX, 5XX)
-        printd(f"Got HTTPError, exception={http_err}, payload={data}")
-        raise http_err
-    except requests.exceptions.RequestException as req_err:
-        # Handle other requests-related errors (e.g., connection error)
-        printd(f"Got RequestException, exception={req_err}")
-        raise req_err
-    except Exception as e:
-        # Handle other potential errors
-        printd(f"Got unknown Exception, exception={e}")
-        raise e
+    response_json = make_post_request(url, headers, data)
+    return EmbeddingResponse(**response_json)

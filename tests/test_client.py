@@ -11,9 +11,11 @@ from letta import Admin, create_client
 from letta.client.client import LocalClient, RESTClient
 from letta.constants import DEFAULT_PRESET
 from letta.schemas.agent import AgentState
+from letta.schemas.embedding_config import EmbeddingConfig
 from letta.schemas.enums import JobStatus, MessageStreamStatus
 from letta.schemas.letta_message import FunctionCallMessage, InternalMonologue
 from letta.schemas.letta_response import LettaResponse, LettaStreamingResponse
+from letta.schemas.llm_config import LLMConfig
 from letta.schemas.message import Message
 from letta.schemas.usage import LettaUsageStatistics
 
@@ -72,6 +74,8 @@ def client(request):
         server_url = None
         client = create_client()
 
+    client.set_default_llm_config(LLMConfig.default_config("gpt-4"))
+    client.set_default_embedding_config(EmbeddingConfig.default_config(provider="openai"))
     try:
         yield client
     finally:
@@ -391,10 +395,12 @@ def test_sources(client: Union[LocalClient, RESTClient], agent: AgentState):
     print(sources)
 
     # detach the source
+    assert len(client.get_archival_memory(agent_id=agent.id)) > 0, "No archival memory"
     deleted_source = client.detach_source(source_id=source.id, agent_id=agent.id)
     assert deleted_source.id == source.id
     archival_memories = client.get_archival_memory(agent_id=agent.id)
     assert len(archival_memories) == 0, f"Failed to detach source: {len(archival_memories)}"
+    assert source.id not in [s.id for s in client.list_attached_sources(agent.id)]
 
     # delete the source
     client.delete_source(source.id)
@@ -419,3 +425,13 @@ def test_organization(client: RESTClient):
     if isinstance(client, LocalClient):
         pytest.skip("Skipping test_organization because LocalClient does not support organizations")
     client.base_url
+
+
+def test_model_configs(client: Union[LocalClient, RESTClient]):
+    # _reset_config()
+
+    model_configs = client.list_models()
+    print("MODEL CONFIGS", model_configs)
+
+    embedding_configs = client.list_embedding_models()
+    print("EMBEDDING CONFIGS", embedding_configs)

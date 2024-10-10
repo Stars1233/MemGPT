@@ -1,90 +1,74 @@
-from typing import Union
-
 import requests
 
+from letta.llm_api.helpers import make_post_request
+from letta.schemas.llm_config import LLMConfig
 from letta.schemas.openai.chat_completion_response import ChatCompletionResponse
+from letta.schemas.openai.chat_completions import ChatCompletionRequest
 from letta.schemas.openai.embedding_response import EmbeddingResponse
-from letta.utils import smart_urljoin
-
-MODEL_TO_AZURE_ENGINE = {
-    "gpt-4-1106-preview": "gpt-4",
-    "gpt-4": "gpt-4",
-    "gpt-4-32k": "gpt-4-32k",
-    "gpt-3.5": "gpt-35-turbo",
-    "gpt-3.5-turbo": "gpt-35-turbo",
-    "gpt-3.5-turbo-16k": "gpt-35-turbo-16k",
-}
+from letta.settings import ModelSettings
 
 
-def clean_azure_endpoint(raw_endpoint_name: str) -> str:
-    """Make sure the endpoint is of format 'https://YOUR_RESOURCE_NAME.openai.azure.com'"""
-    if raw_endpoint_name is None:
-        raise ValueError(raw_endpoint_name)
-    endpoint_address = raw_endpoint_name.strip("/").replace(".openai.azure.com", "")
-    endpoint_address = endpoint_address.replace("http://", "")
-    endpoint_address = endpoint_address.replace("https://", "")
-    return endpoint_address
+def get_azure_chat_completions_endpoint(base_url: str, model: str, api_version: str):
+    return f"{base_url}/openai/deployments/{model}/chat/completions?api-version={api_version}"
 
 
-def azure_openai_get_model_list(url: str, api_key: Union[str, None], api_version: str) -> dict:
+def get_azure_embeddings_endpoint(base_url: str, model: str, api_version: str):
+    return f"{base_url}/openai/deployments/{model}/embeddings?api-version={api_version}"
+
+
+def get_azure_model_list_endpoint(base_url: str, api_version: str):
+    return f"{base_url}/openai/models?api-version={api_version}"
+
+
+def azure_openai_get_model_list(base_url: str, api_key: str, api_version: str) -> list:
     """https://learn.microsoft.com/en-us/rest/api/azureopenai/models/list?view=rest-azureopenai-2023-05-15&tabs=HTTP"""
-    from letta.utils import printd
 
     # https://xxx.openai.azure.com/openai/models?api-version=xxx
-    url = smart_urljoin(url, "openai")
-    url = smart_urljoin(url, f"models?api-version={api_version}")
-
     headers = {"Content-Type": "application/json"}
     if api_key is not None:
         headers["api-key"] = f"{api_key}"
 
-    printd(f"Sending request to {url}")
+    url = get_azure_model_list_endpoint(base_url, api_version)
     try:
         response = requests.get(url, headers=headers)
-        response.raise_for_status()  # Raises HTTPError for 4XX/5XX status
-        response = response.json()  # convert to dict from string
-        printd(f"response = {response}")
-        return response
-    except requests.exceptions.HTTPError as http_err:
-        # Handle HTTP errors (e.g., response 4XX, 5XX)
-        try:
-            response = response.json()
-        except:
-            pass
-        printd(f"Got HTTPError, exception={http_err}, response={response}")
-        raise http_err
-    except requests.exceptions.RequestException as req_err:
-        # Handle other requests-related errors (e.g., connection error)
-        try:
-            response = response.json()
-        except:
-            pass
-        printd(f"Got RequestException, exception={req_err}, response={response}")
-        raise req_err
-    except Exception as e:
-        # Handle other potential errors
-        try:
-            response = response.json()
-        except:
-            pass
-        printd(f"Got unknown Exception, exception={e}, response={response}")
-        raise e
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(f"Failed to retrieve model list: {e}")
+
+    return response.json().get("data", [])
+
+
+def azure_openai_get_chat_completion_model_list(base_url: str, api_key: str, api_version: str) -> list:
+    model_list = azure_openai_get_model_list(base_url, api_key, api_version)
+    # Extract models that support text generation
+    model_options = [m for m in model_list if m.get("capabilities").get("chat_completion") == True]
+    return model_options
+
+
+def azure_openai_get_embeddings_model_list(base_url: str, api_key: str, api_version: str, require_embedding_in_name: bool = True) -> list:
+    def valid_embedding_model(m: dict):
+        valid_name = True
+        if require_embedding_in_name:
+            valid_name = "embedding" in m["id"]
+
+        return m.get("capabilities").get("embeddings") == True and valid_name
+
+    model_list = azure_openai_get_model_list(base_url, api_key, api_version)
+    # Extract models that support embeddings
+
+    model_options = [m for m in model_list if valid_embedding_model(m)]
+    return model_options
 
 
 def azure_openai_chat_completions_request(
-    resource_name: str, deployment_id: str, api_version: str, api_key: str, data: dict
+    model_settings: ModelSettings, llm_config: LLMConfig, api_key: str, chat_completion_request: ChatCompletionRequest
 ) -> ChatCompletionResponse:
     """https://learn.microsoft.com/en-us/azure/ai-services/openai/reference#chat-completions"""
-    from letta.utils import printd
 
-    assert resource_name is not None, "Missing required field when calling Azure OpenAI"
-    assert deployment_id is not None, "Missing required field when calling Azure OpenAI"
-    assert api_version is not None, "Missing required field when calling Azure OpenAI"
     assert api_key is not None, "Missing required field when calling Azure OpenAI"
 
-    resource_name = clean_azure_endpoint(resource_name)
-    url = f"https://{resource_name}.openai.azure.com/openai/deployments/{deployment_id}/chat/completions?api-version={api_version}"
     headers = {"Content-Type": "application/json", "api-key": f"{api_key}"}
+    data = chat_completion_request.model_dump(exclude_none=True)
 
     # If functions == None, strip from the payload
     if "functions" in data and data["functions"] is None:
@@ -95,61 +79,22 @@ def azure_openai_chat_completions_request(
         data.pop("tools")
         data.pop("tool_choice", None)  # extra safe,  should exist always (default="auto")
 
-    printd(f"Sending request to {url}")
-    try:
-        data["messages"] = [i.to_openai_dict() for i in data["messages"]]
-        response = requests.post(url, headers=headers, json=data)
-        printd(f"response = {response}")
-        response.raise_for_status()  # Raises HTTPError for 4XX/5XX status
-        response = response.json()  # convert to dict from string
-        printd(f"response.json = {response}")
-        # NOTE: azure openai does not include "content" in the response when it is None, so we need to add it
-        if "content" not in response["choices"][0].get("message"):
-            response["choices"][0]["message"]["content"] = None
-        response = ChatCompletionResponse(**response)  # convert to 'dot-dict' style which is the openai python client default
-        return response
-    except requests.exceptions.HTTPError as http_err:
-        # Handle HTTP errors (e.g., response 4XX, 5XX)
-        printd(f"Got HTTPError, exception={http_err}, payload={data}")
-        raise http_err
-    except requests.exceptions.RequestException as req_err:
-        # Handle other requests-related errors (e.g., connection error)
-        printd(f"Got RequestException, exception={req_err}")
-        raise req_err
-    except Exception as e:
-        # Handle other potential errors
-        printd(f"Got unknown Exception, exception={e}")
-        raise e
+    url = get_azure_chat_completions_endpoint(model_settings.azure_base_url, llm_config.model, model_settings.api_version)
+    response_json = make_post_request(url, headers, data)
+    # NOTE: azure openai does not include "content" in the response when it is None, so we need to add it
+    if "content" not in response_json["choices"][0].get("message"):
+        response_json["choices"][0]["message"]["content"] = None
+    response = ChatCompletionResponse(**response_json)  # convert to 'dot-dict' style which is the openai python client default
+    return response
 
 
 def azure_openai_embeddings_request(
     resource_name: str, deployment_id: str, api_version: str, api_key: str, data: dict
 ) -> EmbeddingResponse:
     """https://learn.microsoft.com/en-us/azure/ai-services/openai/reference#embeddings"""
-    from letta.utils import printd
 
-    resource_name = clean_azure_endpoint(resource_name)
     url = f"https://{resource_name}.openai.azure.com/openai/deployments/{deployment_id}/embeddings?api-version={api_version}"
     headers = {"Content-Type": "application/json", "api-key": f"{api_key}"}
 
-    printd(f"Sending request to {url}")
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        printd(f"response = {response}")
-        response.raise_for_status()  # Raises HTTPError for 4XX/5XX status
-        response = response.json()  # convert to dict from string
-        printd(f"response.json = {response}")
-        response = EmbeddingResponse(**response)  # convert to 'dot-dict' style which is the openai python client default
-        return response
-    except requests.exceptions.HTTPError as http_err:
-        # Handle HTTP errors (e.g., response 4XX, 5XX)
-        printd(f"Got HTTPError, exception={http_err}, payload={data}")
-        raise http_err
-    except requests.exceptions.RequestException as req_err:
-        # Handle other requests-related errors (e.g., connection error)
-        printd(f"Got RequestException, exception={req_err}")
-        raise req_err
-    except Exception as e:
-        # Handle other potential errors
-        printd(f"Got unknown Exception, exception={e}")
-        raise e
+    response_json = make_post_request(url, headers, data)
+    return EmbeddingResponse(**response_json)

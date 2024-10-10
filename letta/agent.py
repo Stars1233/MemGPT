@@ -18,7 +18,7 @@ from letta.constants import (
     MESSAGE_SUMMARY_WARNING_FRAC,
 )
 from letta.interface import AgentInterface
-from letta.llm_api.llm_api_tools import create, is_context_overflow_error
+from letta.llm_api.llm_api_tools import create
 from letta.memory import ArchivalMemory, RecallMemory, summarize_messages
 from letta.metadata import MetadataStore
 from letta.persistence_manager import LocalStateManager
@@ -56,6 +56,7 @@ from letta.utils import (
 )
 
 from .errors import LLMError
+from .llm_api.helpers import is_context_overflow_error
 
 
 def compile_memory_metadata_block(
@@ -207,7 +208,7 @@ class BaseAgent(ABC):
         recreate_message_timestamp: bool = True,  # if True, when input is a Message type, recreated the 'created_at' field
         stream: bool = False,  # TODO move to config?
         timestamp: Optional[datetime.datetime] = None,
-        inner_thoughts_in_kwargs: OptionState = OptionState.DEFAULT,
+        inner_thoughts_in_kwargs_option: OptionState = OptionState.DEFAULT,
         ms: Optional[MetadataStore] = None,
     ) -> AgentStepResponse:
         """
@@ -223,7 +224,7 @@ class BaseAgent(ABC):
 class Agent(BaseAgent):
     def __init__(
         self,
-        interface: AgentInterface,
+        interface: Optional[AgentInterface],
         # agents can be created from providing agent_state
         agent_state: AgentState,
         tools: List[Tool],
@@ -237,10 +238,9 @@ class Agent(BaseAgent):
         self.agent_state = agent_state
         assert isinstance(self.agent_state.memory, Memory), f"Memory object is not of type Memory: {type(self.agent_state.memory)}"
 
-        try:
-            self.link_tools(tools)
-        except Exception as e:
-            raise ValueError(f"Encountered an error while trying to link agent tools during initialization:\n{str(e)}")
+        # link tools
+        self.tools = tools
+        self.link_tools(tools)
 
         # gpt-4, gpt-3.5-turbo, ...
         self.model = self.agent_state.llm_config.model
@@ -339,19 +339,27 @@ class Agent(BaseAgent):
         for tool_name in self.agent_state.tools:
             assert tool_name in [tool.name for tool in tools], f"Tool name {tool_name} not included in agent tool list"
 
+        # Update tools
+        self.tools = tools
+
         # Store the functions schemas (this is passed as an argument to ChatCompletion)
         self.functions = []
         self.functions_python = {}
         env = {}
         env.update(globals())
         for tool in tools:
-            # WARNING: name may not be consistent?
-            if tool.module:  # execute the whole module
-                exec(tool.module, env)
-            else:
-                exec(tool.source_code, env)
-            self.functions_python[tool.name] = env[tool.name]
-            self.functions.append(tool.json_schema)
+            try:
+                # WARNING: name may not be consistent?
+                if tool.module:  # execute the whole module
+                    exec(tool.module, env)
+                else:
+                    exec(tool.source_code, env)
+
+                self.functions_python[tool.json_schema["name"]] = env[tool.json_schema["name"]]
+                self.functions.append(tool.json_schema)
+            except Exception as e:
+                warnings.warn(f"WARNING: tool {tool.name} failed to link")
+                print(e)
         assert all([callable(f) for k, f in self.functions_python.items()]), self.functions_python
 
     def _load_messages_from_recall(self, message_ids: List[str]) -> List[Message]:
@@ -457,7 +465,7 @@ class Agent(BaseAgent):
         function_call: str = "auto",
         first_message: bool = False,  # hint
         stream: bool = False,  # TODO move to config?
-        inner_thoughts_in_kwargs: OptionState = OptionState.DEFAULT,
+        inner_thoughts_in_kwargs_option: OptionState = OptionState.DEFAULT,
     ) -> ChatCompletionResponse:
         """Get response from LLM API"""
         try:
@@ -475,10 +483,10 @@ class Agent(BaseAgent):
                 stream=stream,
                 stream_inferface=self.interface,
                 # putting inner thoughts in func args or not
-                inner_thoughts_in_kwargs=inner_thoughts_in_kwargs,
+                inner_thoughts_in_kwargs_option=inner_thoughts_in_kwargs_option,
             )
 
-            if len(response.choices) == 0:
+            if len(response.choices) == 0 or response.choices[0] is None:
                 raise Exception(f"API call didn't return a message: {response}")
 
             # special case for 'length'
@@ -548,18 +556,24 @@ class Agent(BaseAgent):
             )  # extend conversation with assistant's reply
             printd(f"Function call message: {messages[-1]}")
 
-            # The content if then internal monologue, not chat
-            self.interface.internal_monologue(response_message.content, msg_obj=messages[-1])
+            nonnull_content = False
+            if response_message.content:
+                # The content if then internal monologue, not chat
+                self.interface.internal_monologue(response_message.content, msg_obj=messages[-1])
+                # Flag to avoid printing a duplicate if inner thoughts get popped from the function call
+                nonnull_content = True
 
             # Step 3: call the function
             # Note: the JSON response may not always be valid; be sure to handle errors
-
-            # Failure case 1: function name is wrong
             function_call = (
                 response_message.function_call if response_message.function_call is not None else response_message.tool_calls[0].function
             )
+
+            # Get the name of the function
             function_name = function_call.name
             printd(f"Request to call function {function_name} with tool_call_id: {tool_call_id}")
+
+            # Failure case 1: function name is wrong
             try:
                 function_to_call = self.functions_python[function_name]
             except KeyError:
@@ -604,9 +618,21 @@ class Agent(BaseAgent):
                 self.interface.function_message(f"Error: {error_msg}", msg_obj=messages[-1])
                 return messages, False, True  # force a heartbeat to allow agent to handle error
 
+            # Check if inner thoughts is in the function call arguments (possible apparently if you are using Azure)
+            if "inner_thoughts" in function_args:
+                response_message.content = function_args.pop("inner_thoughts")
+            # The content if then internal monologue, not chat
+            if response_message.content and not nonnull_content:
+                self.interface.internal_monologue(response_message.content, msg_obj=messages[-1])
+
             # (Still parsing function args)
             # Handle requests for immediate heartbeat
             heartbeat_request = function_args.pop("request_heartbeat", None)
+
+            # Edge case: heartbeat_request is returned as a stringified boolean, we will attempt to parse:
+            if isinstance(heartbeat_request, str) and heartbeat_request.lower().strip() == "true":
+                heartbeat_request = True
+
             if not isinstance(heartbeat_request, bool) or heartbeat_request is None:
                 printd(
                     f"{CLI_WARNING_PREFIX}'request_heartbeat' arg parsed was not a bool or None, type={type(heartbeat_request)}, value={heartbeat_request}"
@@ -712,7 +738,7 @@ class Agent(BaseAgent):
         recreate_message_timestamp: bool = True,  # if True, when input is a Message type, recreated the 'created_at' field
         stream: bool = False,  # TODO move to config?
         timestamp: Optional[datetime.datetime] = None,
-        inner_thoughts_in_kwargs: OptionState = OptionState.DEFAULT,
+        inner_thoughts_in_kwargs_option: OptionState = OptionState.DEFAULT,
         ms: Optional[MetadataStore] = None,
     ) -> AgentStepResponse:
         """Top-level event message handler for the Letta agent"""
@@ -791,7 +817,7 @@ class Agent(BaseAgent):
                         message_sequence=input_message_sequence,
                         first_message=True,  # passed through to the prompt formatter
                         stream=stream,
-                        inner_thoughts_in_kwargs=inner_thoughts_in_kwargs,
+                        inner_thoughts_in_kwargs_option=inner_thoughts_in_kwargs_option,
                     )
                     if verify_first_message_correctness(response, require_monologue=self.first_message_verify_mono):
                         break
@@ -804,7 +830,7 @@ class Agent(BaseAgent):
                 response = self._get_ai_reply(
                     message_sequence=input_message_sequence,
                     stream=stream,
-                    inner_thoughts_in_kwargs=inner_thoughts_in_kwargs,
+                    inner_thoughts_in_kwargs_option=inner_thoughts_in_kwargs_option,
                 )
 
             # Step 3: check if LLM wanted to call a function
@@ -888,7 +914,7 @@ class Agent(BaseAgent):
                     recreate_message_timestamp=recreate_message_timestamp,
                     stream=stream,
                     timestamp=timestamp,
-                    inner_thoughts_in_kwargs=inner_thoughts_in_kwargs,
+                    inner_thoughts_in_kwargs_option=inner_thoughts_in_kwargs_option,
                     ms=ms,
                 )
 
@@ -1114,48 +1140,10 @@ class Agent(BaseAgent):
     def add_function(self, function_name: str) -> str:
         # TODO: refactor
         raise NotImplementedError
-        # if function_name in self.functions_python.keys():
-        #    msg = f"Function {function_name} already loaded"
-        #    printd(msg)
-        #    return msg
-
-        # available_functions = load_all_function_sets()
-        # if function_name not in available_functions.keys():
-        #    raise ValueError(f"Function {function_name} not found in function library")
-
-        # self.functions.append(available_functions[function_name]["json_schema"])
-        # self.functions_python[function_name] = available_functions[function_name]["python_function"]
-
-        # msg = f"Added function {function_name}"
-        ## self.save()
-        # self.update_state()
-        # printd(msg)
-        # return msg
 
     def remove_function(self, function_name: str) -> str:
         # TODO: refactor
         raise NotImplementedError
-        # if function_name not in self.functions_python.keys():
-        #    msg = f"Function {function_name} not loaded, ignoring"
-        #    printd(msg)
-        #    return msg
-
-        ## only allow removal of user defined functions
-        # user_func_path = Path(USER_FUNCTIONS_DIR)
-        # func_path = Path(inspect.getfile(self.functions_python[function_name]))
-        # is_subpath = func_path.resolve().parts[: len(user_func_path.resolve().parts)] == user_func_path.resolve().parts
-
-        # if not is_subpath:
-        #    raise ValueError(f"Function {function_name} is not user defined and cannot be removed")
-
-        # self.functions = [f_schema for f_schema in self.functions if f_schema["name"] != function_name]
-        # self.functions_python.pop(function_name)
-
-        # msg = f"Removed function {function_name}"
-        ## self.save()
-        # self.update_state()
-        # printd(msg)
-        # return msg
 
     def update_state(self) -> AgentState:
         message_ids = [msg.id for msg in self._messages]
@@ -1376,6 +1364,10 @@ def save_agent(agent: Agent, ms: MetadataStore):
         ms.update_agent(agent_state)
     else:
         ms.create_agent(agent_state)
+
+    for tool in agent.tools:
+        if ms.get_tool(tool_name=tool.name, user_id=tool.user_id) is None:
+            ms.create_tool(tool)
 
     agent.agent_state = ms.get_agent(agent_id=agent_id)
     assert isinstance(agent.agent_state.memory, Memory), f"Memory is not a Memory object: {type(agent_state.memory)}"

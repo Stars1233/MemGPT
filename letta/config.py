@@ -2,7 +2,6 @@ import configparser
 import inspect
 import json
 import os
-import uuid
 from dataclasses import dataclass
 from typing import Optional
 
@@ -14,6 +13,7 @@ from letta.constants import (
     DEFAULT_HUMAN,
     DEFAULT_PERSONA,
     DEFAULT_PRESET,
+    DEFAULT_USER_ID,
     LETTA_DIR,
 )
 from letta.log import get_logger
@@ -45,7 +45,7 @@ def set_field(config, section, field, value):
 @dataclass
 class LettaConfig:
     config_path: str = os.getenv("MEMGPT_CONFIG_PATH") or os.path.join(LETTA_DIR, "config")
-    anon_clientid: str = str(uuid.UUID(int=0))
+    anon_clientid: str = DEFAULT_USER_ID
 
     # preset
     preset: str = DEFAULT_PRESET  # TODO: rename to system prompt
@@ -55,10 +55,10 @@ class LettaConfig:
     human: str = DEFAULT_HUMAN
 
     # model parameters
-    default_llm_config: LLMConfig = None
+    # default_llm_config: LLMConfig = None
 
     # embedding parameters
-    default_embedding_config: EmbeddingConfig = None
+    # default_embedding_config: EmbeddingConfig = None
 
     # NONE OF THIS IS CONFIG ↓↓↓↓↓
     # @norton120 these are the metdadatastore
@@ -100,10 +100,6 @@ class LettaConfig:
         # self.context_window = int(self.context_window)
         pass
 
-    @staticmethod
-    def generate_uuid() -> str:
-        return uuid.UUID(int=uuid.getnode()).hex
-
     @classmethod
     def load(cls, llm_config: Optional[LLMConfig] = None, embedding_config: Optional[EmbeddingConfig] = None) -> "LettaConfig":
         # avoid circular import
@@ -134,42 +130,42 @@ class LettaConfig:
             # read existing config
             config.read(config_path)
 
-            # Handle extraction of nested LLMConfig and EmbeddingConfig
-            llm_config_dict = {
-                # Extract relevant LLM configuration from the config file
-                "model": get_field(config, "model", "model"),
-                "model_endpoint": get_field(config, "model", "model_endpoint"),
-                "model_endpoint_type": get_field(config, "model", "model_endpoint_type"),
-                "model_wrapper": get_field(config, "model", "model_wrapper"),
-                "context_window": get_field(config, "model", "context_window"),
-            }
-            embedding_config_dict = {
-                # Extract relevant Embedding configuration from the config file
-                "embedding_endpoint": get_field(config, "embedding", "embedding_endpoint"),
-                "embedding_model": get_field(config, "embedding", "embedding_model"),
-                "embedding_endpoint_type": get_field(config, "embedding", "embedding_endpoint_type"),
-                "embedding_dim": get_field(config, "embedding", "embedding_dim"),
-                "embedding_chunk_size": get_field(config, "embedding", "embedding_chunk_size"),
-            }
-            # Remove null values
-            llm_config_dict = {k: v for k, v in llm_config_dict.items() if v is not None}
-            embedding_config_dict = {k: v for k, v in embedding_config_dict.items() if v is not None}
+            ## Handle extraction of nested LLMConfig and EmbeddingConfig
+            # llm_config_dict = {
+            #    # Extract relevant LLM configuration from the config file
+            #    "model": get_field(config, "model", "model"),
+            #    "model_endpoint": get_field(config, "model", "model_endpoint"),
+            #    "model_endpoint_type": get_field(config, "model", "model_endpoint_type"),
+            #    "model_wrapper": get_field(config, "model", "model_wrapper"),
+            #    "context_window": get_field(config, "model", "context_window"),
+            # }
+            # embedding_config_dict = {
+            #    # Extract relevant Embedding configuration from the config file
+            #    "embedding_endpoint": get_field(config, "embedding", "embedding_endpoint"),
+            #    "embedding_model": get_field(config, "embedding", "embedding_model"),
+            #    "embedding_endpoint_type": get_field(config, "embedding", "embedding_endpoint_type"),
+            #    "embedding_dim": get_field(config, "embedding", "embedding_dim"),
+            #    "embedding_chunk_size": get_field(config, "embedding", "embedding_chunk_size"),
+            # }
+            ## Remove null values
+            # llm_config_dict = {k: v for k, v in llm_config_dict.items() if v is not None}
+            # embedding_config_dict = {k: v for k, v in embedding_config_dict.items() if v is not None}
             # Correct the types that aren't strings
-            if "context_window" in llm_config_dict and llm_config_dict["context_window"] is not None:
-                llm_config_dict["context_window"] = int(llm_config_dict["context_window"])
-            if "embedding_dim" in embedding_config_dict and embedding_config_dict["embedding_dim"] is not None:
-                embedding_config_dict["embedding_dim"] = int(embedding_config_dict["embedding_dim"])
-            if "embedding_chunk_size" in embedding_config_dict and embedding_config_dict["embedding_chunk_size"] is not None:
-                embedding_config_dict["embedding_chunk_size"] = int(embedding_config_dict["embedding_chunk_size"])
-            # Construct the inner properties
-            llm_config = LLMConfig(**llm_config_dict)
-            embedding_config = EmbeddingConfig(**embedding_config_dict)
+            # if "context_window" in llm_config_dict and llm_config_dict["context_window"] is not None:
+            #    llm_config_dict["context_window"] = int(llm_config_dict["context_window"])
+            # if "embedding_dim" in embedding_config_dict and embedding_config_dict["embedding_dim"] is not None:
+            #    embedding_config_dict["embedding_dim"] = int(embedding_config_dict["embedding_dim"])
+            # if "embedding_chunk_size" in embedding_config_dict and embedding_config_dict["embedding_chunk_size"] is not None:
+            #    embedding_config_dict["embedding_chunk_size"] = int(embedding_config_dict["embedding_chunk_size"])
+            ## Construct the inner properties
+            # llm_config = LLMConfig(**llm_config_dict)
+            # embedding_config = EmbeddingConfig(**embedding_config_dict)
 
             # Everything else
             config_dict = {
                 # Two prepared configs
-                "default_llm_config": llm_config,
-                "default_embedding_config": embedding_config,
+                # "default_llm_config": llm_config,
+                # "default_embedding_config": embedding_config,
                 # Agent related
                 "preset": get_field(config, "defaults", "preset"),
                 "persona": get_field(config, "defaults", "persona"),
@@ -199,8 +195,7 @@ class LettaConfig:
         # assert llm_config is not None, "LLM config must be provided if config does not exist"
 
         # create new config
-        anon_clientid = LettaConfig.generate_uuid()
-        config = cls(anon_clientid=anon_clientid, config_path=config_path)
+        config = cls(config_path=config_path)
 
         config.create_config_dir()  # create dirs
 
@@ -217,53 +212,53 @@ class LettaConfig:
         set_field(config, "defaults", "human", self.human)
 
         # model defaults
-        set_field(config, "model", "model", self.default_llm_config.model)
-        set_field(config, "model", "model_endpoint", self.default_llm_config.model_endpoint)
-        set_field(
-            config,
-            "model",
-            "model_endpoint_type",
-            self.default_llm_config.model_endpoint_type,
-        )
-        set_field(config, "model", "model_wrapper", self.default_llm_config.model_wrapper)
-        set_field(
-            config,
-            "model",
-            "context_window",
-            str(self.default_llm_config.context_window),
-        )
+        # set_field(config, "model", "model", self.default_llm_config.model)
+        ##set_field(config, "model", "model_endpoint", self.default_llm_config.model_endpoint)
+        # set_field(
+        #    config,
+        #    "model",
+        #    "model_endpoint_type",
+        #    self.default_llm_config.model_endpoint_type,
+        # )
+        # set_field(config, "model", "model_wrapper", self.default_llm_config.model_wrapper)
+        # set_field(
+        #    config,
+        #    "model",
+        #    "context_window",
+        #    str(self.default_llm_config.context_window),
+        # )
 
-        # embeddings
-        set_field(
-            config,
-            "embedding",
-            "embedding_endpoint_type",
-            self.default_embedding_config.embedding_endpoint_type,
-        )
-        set_field(
-            config,
-            "embedding",
-            "embedding_endpoint",
-            self.default_embedding_config.embedding_endpoint,
-        )
-        set_field(
-            config,
-            "embedding",
-            "embedding_model",
-            self.default_embedding_config.embedding_model,
-        )
-        set_field(
-            config,
-            "embedding",
-            "embedding_dim",
-            str(self.default_embedding_config.embedding_dim),
-        )
-        set_field(
-            config,
-            "embedding",
-            "embedding_chunk_size",
-            str(self.default_embedding_config.embedding_chunk_size),
-        )
+        ## embeddings
+        # set_field(
+        #    config,
+        #    "embedding",
+        #    "embedding_endpoint_type",
+        #    self.default_embedding_config.embedding_endpoint_type,
+        # )
+        # set_field(
+        #    config,
+        #    "embedding",
+        #    "embedding_endpoint",
+        #    self.default_embedding_config.embedding_endpoint,
+        # )
+        # set_field(
+        #    config,
+        #    "embedding",
+        #    "embedding_model",
+        #    self.default_embedding_config.embedding_model,
+        # )
+        # set_field(
+        #    config,
+        #    "embedding",
+        #    "embedding_dim",
+        #    str(self.default_embedding_config.embedding_dim),
+        # )
+        # set_field(
+        #    config,
+        #    "embedding",
+        #    "embedding_chunk_size",
+        #    str(self.default_embedding_config.embedding_chunk_size),
+        # )
 
         # archival storage
         set_field(config, "archival_storage", "type", self.archival_storage_type)
@@ -284,8 +279,6 @@ class LettaConfig:
         set_field(config, "version", "letta_version", letta.__version__)
 
         # client
-        if not self.anon_clientid:
-            self.anon_clientid = self.generate_uuid()
         set_field(config, "client", "anon_clientid", self.anon_clientid)
 
         # always make sure all directories are present

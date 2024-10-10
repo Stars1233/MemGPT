@@ -2,11 +2,12 @@ from typing import Dict, List, Optional
 
 from pydantic import Field
 
-from letta.functions.schema_generator import (
+from letta.functions.helpers import (
+    generate_composio_tool_wrapper,
     generate_crewai_tool_wrapper,
     generate_langchain_tool_wrapper,
-    generate_schema_from_args_schema,
 )
+from letta.functions.schema_generator import generate_schema_from_args_schema
 from letta.schemas.letta_base import LettaBase
 from letta.schemas.openai.chat_completions import ToolCall
 
@@ -58,27 +59,41 @@ class Tool(BaseTool):
         )
 
     @classmethod
-    def from_langchain(cls, langchain_tool) -> "Tool":
+    def get_composio_tool(
+        cls,
+        action: "ActionType",
+    ) -> "Tool":
         """
-        Class method to create an instance of Tool from a Langchain tool (must be from langchain_community.tools).
+        Class method to create an instance of Letta-compatible Composio Tool.
+        Check https://docs.composio.dev/introduction/intro/overview to look at options for get_composio_tool
+
+        This function will error if we find more than one tool, or 0 tools.
 
         Args:
-            langchain_tool (LangchainTool): An instance of a crewAI BaseTool (BaseTool from crewai)
-
+            action ActionType: A action name to filter tools by.
         Returns:
-            Tool: A Letta Tool initialized with attributes derived from the provided crewAI BaseTool object.
+            Tool: A Letta Tool initialized with attributes derived from the Composio tool.
         """
-        description = langchain_tool.description
+        from composio_langchain import ComposioToolSet
+
+        composio_toolset = ComposioToolSet()
+        composio_tools = composio_toolset.get_tools(actions=[action])
+
+        assert len(composio_tools) > 0, "User supplied parameters do not match any Composio tools"
+        assert len(composio_tools) == 1, f"User supplied parameters match too many Composio tools; {len(composio_tools)} > 1"
+
+        composio_tool = composio_tools[0]
+
+        description = composio_tool.description
         source_type = "python"
-        tags = ["langchain"]
-        # NOTE: langchain tools may come from different packages
-        wrapper_func_name, wrapper_function_str = generate_langchain_tool_wrapper(langchain_tool.__class__.__name__)
-        json_schema = generate_schema_from_args_schema(langchain_tool.args_schema, name=wrapper_func_name, description=description)
+        tags = ["composio"]
+        wrapper_func_name, wrapper_function_str = generate_composio_tool_wrapper(action)
+        json_schema = generate_schema_from_args_schema(composio_tool.args_schema, name=wrapper_func_name, description=description)
 
         # append heartbeat (necessary for triggering another reasoning step after this tool call)
         json_schema["parameters"]["properties"]["request_heartbeat"] = {
             "type": "boolean",
-            "description": "Request an immediate heartbeat after function execution. Set to 'true' if you want to send a follow-up message or run a follow-up function.",
+            "description": "Request an immediate heartbeat after function execution. Set to `True` if you want to send a follow-up message or run a follow-up function.",
         }
         json_schema["parameters"]["required"].append("request_heartbeat")
 
@@ -92,7 +107,42 @@ class Tool(BaseTool):
         )
 
     @classmethod
-    def from_crewai(cls, crewai_tool) -> "Tool":
+    def from_langchain(cls, langchain_tool: "LangChainBaseTool", additional_imports_module_attr_map: dict[str, str] = None) -> "Tool":
+        """
+        Class method to create an instance of Tool from a Langchain tool (must be from langchain_community.tools).
+
+        Args:
+            langchain_tool (LangChainBaseTool): An instance of a crewAI BaseTool (BaseTool from crewai)
+            additional_imports_module_attr_map (dict[str, str]): A mapping of module names to attribute name. This is used internally to import all the required classes for the langchain tool. For example, you would pass in `{"langchain_community.utilities": "WikipediaAPIWrapper"}` for `from langchain_community.tools import WikipediaQueryRun`. NOTE: You do NOT need to specify the tool import here, that is done automatically for you.
+
+        Returns:
+            Tool: A Letta Tool initialized with attributes derived from the provided crewAI BaseTool object.
+        """
+        description = langchain_tool.description
+        source_type = "python"
+        tags = ["langchain"]
+        # NOTE: langchain tools may come from different packages
+        wrapper_func_name, wrapper_function_str = generate_langchain_tool_wrapper(langchain_tool, additional_imports_module_attr_map)
+        json_schema = generate_schema_from_args_schema(langchain_tool.args_schema, name=wrapper_func_name, description=description)
+
+        # append heartbeat (necessary for triggering another reasoning step after this tool call)
+        json_schema["parameters"]["properties"]["request_heartbeat"] = {
+            "type": "boolean",
+            "description": "Request an immediate heartbeat after function execution. Set to `True` if you want to send a follow-up message or run a follow-up function.",
+        }
+        json_schema["parameters"]["required"].append("request_heartbeat")
+
+        return cls(
+            name=wrapper_func_name,
+            description=description,
+            source_type=source_type,
+            tags=tags,
+            source_code=wrapper_function_str,
+            json_schema=json_schema,
+        )
+
+    @classmethod
+    def from_crewai(cls, crewai_tool: "CrewAIBaseTool", additional_imports_module_attr_map: dict[str, str] = None) -> "Tool":
         """
         Class method to create an instance of Tool from a crewAI BaseTool object.
 
@@ -102,17 +152,16 @@ class Tool(BaseTool):
         Returns:
             Tool: A Letta Tool initialized with attributes derived from the provided crewAI BaseTool object.
         """
-        crewai_tool.name
         description = crewai_tool.description
         source_type = "python"
         tags = ["crew-ai"]
-        wrapper_func_name, wrapper_function_str = generate_crewai_tool_wrapper(crewai_tool.__class__.__name__)
+        wrapper_func_name, wrapper_function_str = generate_crewai_tool_wrapper(crewai_tool, additional_imports_module_attr_map)
         json_schema = generate_schema_from_args_schema(crewai_tool.args_schema, name=wrapper_func_name, description=description)
 
         # append heartbeat (necessary for triggering another reasoning step after this tool call)
         json_schema["parameters"]["properties"]["request_heartbeat"] = {
             "type": "boolean",
-            "description": "Request an immediate heartbeat after function execution. Set to 'true' if you want to send a follow-up message or run a follow-up function.",
+            "description": "Request an immediate heartbeat after function execution. Set to `True` if you want to send a follow-up message or run a follow-up function.",
         }
         json_schema["parameters"]["required"].append("request_heartbeat")
 
@@ -128,7 +177,7 @@ class Tool(BaseTool):
 
 class ToolCreate(BaseTool):
     name: Optional[str] = Field(None, description="The name of the function (auto-generated from source_code if not provided).")
-    tags: List[str] = Field(..., description="Metadata tags.")
+    tags: List[str] = Field([], description="Metadata tags.")
     source_code: str = Field(..., description="The source code of the function.")
     json_schema: Optional[Dict] = Field(
         None, description="The JSON schema of the function (auto-generated from source_code if not provided)"
