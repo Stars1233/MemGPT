@@ -4,9 +4,6 @@ Build stateful agents with memory that can learn and improve over time.
 
 Letta (f.k.a. MemGPT) is actively developed. The current source code lives in [`letta-ai/letta-code`](https://github.com/letta-ai/letta-code), which includes the agent harness, interactive terminal UI, App Server, channels, and the runtime used by the desktop and web apps.
 
-> [!NOTE]
-> This repository now serves as a landing page for the Letta project. The retired Letta V1 server source is preserved on the [`archive`](https://github.com/letta-ai/letta/tree/archive) branch for historical reference.
-
 ## Get started
 
 Install Letta from npm:
@@ -35,8 +32,8 @@ You can also use Letta through:
 - the [Letta Agent SDK](https://docs.letta.com/letta-agent-sdk/overview) for building agents into TypeScript applications
 - [Letta Cloud](https://github.com/letta-ai/letta-code#letta-cloud) for keeping agent memory, identity, and conversations available across computers
 
-See the [`letta-ai/letta-code`](https://github.com/letta-ai/letta-code) README and the [Letta documentation](https://docs.letta.com) for current installation, development, and deployment instructions.
+See the [Letta documentation](https://docs.letta.com) for current installation, development, and deployment instructions.
 
 ## Historical source
 
-The [`archive`](https://github.com/letta-ai/letta/tree/archive) branch contains the retired Letta V1 API server as it existed when this repository was archived. Existing tags and releases remain available for reproducibility. That source is unsupported, receives no fixes or security updates, and should not be used in production.
+The [`archive`](https://github.com/letta-ai/letta/tree/archive) branch contains the retired Letta V1 API server. Existing tags and releases remain available for reproducibility, but active projects should use the [current source](https://github.com/letta-ai/letta-code).
